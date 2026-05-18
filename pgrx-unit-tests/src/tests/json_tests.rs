@@ -100,4 +100,22 @@ mod tests {
 
         Ok(())
     }
+
+    #[pg_test]
+    fn test_jsonb_roundtrip_complex() -> Result<(), pgrx::spi::Error> {
+        let input = serde_json::json!({
+            "user": "🦀",
+            "nested": {
+                "arr": [1, true, null, "text", {"k": "v"}]
+            },
+            "num": 123.456
+        });
+
+        let json = Spi::get_one_with_args::<JsonB>("SELECT $1::jsonb;", &[JsonB(input.clone()).into()])?
+            .expect("jsonb was null");
+
+        assert_eq!(json.0, input);
+
+        Ok(())
+    }
 }

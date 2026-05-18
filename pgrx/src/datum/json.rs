@@ -8,9 +8,10 @@
 //LICENSE
 //LICENSE Use of this source code is governed by the MIT license that can be found in the LICENSE file.
 use crate::{
-    FromDatum, IntoDatum, direct_function_call, direct_function_call_as_datum, pg_sys, vardata_any,
-    varsize_any_exhdr, void_mut_ptr,
+    FromDatum, IntoDatum, direct_function_call, direct_function_call_as_datum, pg_sys,
+    set_varsize_4b, vardata_any, varsize_any_exhdr, void_mut_ptr,
 };
+use core::ptr::addr_of_mut;
 use pgrx_sql_entity_graph::metadata::{
     ArgumentError, ReturnsError, ReturnsRef, SqlMappingRef, SqlTranslatable,
 };
@@ -63,20 +64,13 @@ impl FromDatum for JsonB {
         } else {
             let varlena = datum.cast_mut_ptr();
             let detoasted = pg_sys::pg_detoast_datum_packed(varlena);
+            let len = varsize_any_exhdr(detoasted);
+            let data = vardata_any(detoasted);
+            let slice = std::slice::from_raw_parts(data as *const u8, len);
+            let raw_jsonb = jsonb::RawJsonb::new(slice);
 
-            let cstr = direct_function_call::<&core::ffi::CStr>(
-                pg_sys::jsonb_out,
-                &[Some(detoasted.into())],
-            )
-            .expect("datum must refer to a valid jsonb varlena");
-
-            let value = serde_json::from_str(
-                cstr.to_str().expect("a text version of the jsonb must be valid utf-8"),
-            )
-            .expect("a text version of jsonb must be a valid json");
-
-            // free the cstring returned from direct_function_call -- we don't need it anymore
-            pg_sys::pfree(cstr.as_ptr() as void_mut_ptr);
+            let value =
+                jsonb::from_raw_jsonb::<Value>(&raw_jsonb).unwrap_or_else(|_| jsonb_from_text(detoasted));
 
             // free the detoasted datum if it turned out to be a copy
             if detoasted != varlena {
@@ -135,16 +129,61 @@ impl IntoDatum for Json {
 /// for jsonb
 impl IntoDatum for JsonB {
     fn into_datum(self) -> Option<pg_sys::Datum> {
-        let string = serde_json::to_string(&self.0).unwrap();
-        let cstring = alloc::ffi::CString::new(string)
-            .expect("a text version of jsonb must contain no null terminator");
-
-        unsafe { direct_function_call_as_datum(pg_sys::jsonb_in, &[Some(cstring.as_ptr().into())]) }
+        let value = jsonb::Value::from(&self.0);
+        let bytes = value.to_vec();
+        unsafe {
+            jsonb_from_binary(&bytes).or_else(|| {
+                let string = serde_json::to_string(&self.0).unwrap();
+                let cstring = alloc::ffi::CString::new(string)
+                    .expect("a text version of jsonb must contain no null terminator");
+                direct_function_call_as_datum(pg_sys::jsonb_in, &[Some(cstring.as_ptr().into())])
+            })
+        }
     }
 
     fn type_oid() -> pg_sys::Oid {
         pg_sys::JSONBOID
     }
+}
+
+unsafe fn jsonb_from_text(detoasted: *mut core::ffi::c_void) -> Value {
+    let cstr =
+        direct_function_call::<&core::ffi::CStr>(pg_sys::jsonb_out, &[Some(detoasted.into())])
+            .expect("datum must refer to a valid jsonb varlena");
+
+    let value = serde_json::from_str(
+        cstr.to_str().expect("a text version of the jsonb must be valid utf-8"),
+    )
+    .expect("a text version of jsonb must be a valid json");
+
+    // free the cstring returned from direct_function_call -- we don't need it anymore
+    pg_sys::pfree(cstr.as_ptr() as void_mut_ptr);
+
+    value
+}
+
+unsafe fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
+    let len = bytes.len().saturating_add(pg_sys::VARHDRSZ);
+    if len >= (u32::MAX as usize >> 2) {
+        return None;
+    }
+
+    // SAFETY: palloc gives us a valid pointer and if there's not enough memory it'll raise an error
+    let varlena = pg_sys::palloc(len) as *mut pg_sys::varlena;
+
+    // SAFETY: `varlena` can properly cast into a `varattrib_4b` and all of what it contains is properly
+    // allocated thanks to our call to `palloc` above
+    let varattrib_4b: *mut _ =
+        &mut varlena.cast::<pg_sys::varattrib_4b>().as_mut().unwrap_unchecked().va_4byte;
+
+    set_varsize_4b(varlena, len as i32);
+    std::ptr::copy_nonoverlapping(
+        bytes.as_ptr(),
+        addr_of_mut!((&mut *varattrib_4b).va_data).cast::<u8>(),
+        bytes.len(),
+    );
+
+    Some(pg_sys::Datum::from(varlena))
 }
 
 /// for jsonstring
