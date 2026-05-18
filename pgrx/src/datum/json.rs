@@ -164,6 +164,8 @@ unsafe fn jsonb_from_text(detoasted: *mut pg_sys::varlena) -> Value {
 
 unsafe fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
     let len = bytes.len().saturating_add(pg_sys::VARHDRSZ);
+    // Postgres varlena uses a 30-bit effective length field (the top 2 bits are flag bits).
+    // This is the same upper-bound check used by existing bytea/text datum conversions in pgrx.
     if len >= (u32::MAX as usize >> 2) {
         return None;
     }
@@ -173,13 +175,14 @@ unsafe fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
 
     // SAFETY: `varlena` can properly cast into a `varattrib_4b` and all of what it contains is properly
     // allocated thanks to our call to `palloc` above
-    let varattrib_4b: *mut _ =
-        &mut varlena.cast::<pg_sys::varattrib_4b>().as_mut().unwrap_unchecked().va_4byte;
+    let varattrib = varlena.cast::<pg_sys::varattrib_4b>();
+    let varattrib_ref = varattrib.as_mut().unwrap_unchecked();
+    let varattrib_4b = &mut varattrib_ref.va_4byte;
 
     set_varsize_4b(varlena, len as i32);
     std::ptr::copy_nonoverlapping(
         bytes.as_ptr(),
-        addr_of_mut!((&mut *varattrib_4b).va_data).cast::<u8>(),
+        addr_of_mut!(varattrib_4b.va_data).cast::<u8>(),
         bytes.len(),
     );
 
