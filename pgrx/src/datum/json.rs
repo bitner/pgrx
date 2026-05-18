@@ -71,8 +71,8 @@ impl FromDatum for JsonB {
 
             let value = jsonb::from_raw_jsonb::<Value>(&raw_jsonb).unwrap_or_else(|err| {
                 crate::warning!(
-                    "jsonb binary parse failed for Postgres jsonb datum ({:?}); falling back to jsonb_out text parse",
-                    err
+                    "jsonb binary parse failed (falling back to jsonb_out text parse): {:?}. If this repeats, the jsonb binary encoding may be incompatible.",
+                    err,
                 );
                 jsonb_from_text(detoasted)
             });
@@ -174,6 +174,9 @@ unsafe fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
     // Postgres varlena uses a 30-bit effective length field (the top 2 bits are flag bits).
     // This is the same upper-bound check used by existing bytea/text datum conversions in pgrx.
     if len >= (u32::MAX as usize >> 2) {
+        return None;
+    }
+    if len > i32::MAX as usize {
         return None;
     }
 
