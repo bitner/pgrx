@@ -102,7 +102,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_jsonb_roundtrip_complex() -> Result<(), pgrx::spi::Error> {
+    fn jsonb_roundtrip_complex() -> Result<(), pgrx::spi::Error> {
         let input = serde_json::json!({
             "user": "🦀",
             "nested": {

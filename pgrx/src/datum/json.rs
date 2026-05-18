@@ -70,7 +70,10 @@ impl FromDatum for JsonB {
             let raw_jsonb = jsonb::RawJsonb::new(slice);
 
             let value = jsonb::from_raw_jsonb::<Value>(&raw_jsonb).unwrap_or_else(|err| {
-                crate::warning!("jsonb binary parse failed, falling back to text parse: {}", err);
+                crate::warning!(
+                    "jsonb binary decoding failed, falling back to text-based decoding: {}",
+                    err
+                );
                 jsonb_from_text(detoasted)
             });
 
@@ -186,7 +189,7 @@ unsafe fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
     let varattrib_ref = varlena
         .cast::<pg_sys::varattrib_4b>()
         .as_mut()
-        .expect("unreachable: palloc returned null pointer");
+        .expect("internal invariant violated: null varlena pointer");
     let varattrib_4b = &mut varattrib_ref.va_4byte;
 
     set_varsize_4b(varlena, len as i32);
