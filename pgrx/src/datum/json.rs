@@ -69,8 +69,10 @@ impl FromDatum for JsonB {
             let slice = std::slice::from_raw_parts(data as *const u8, len);
             let raw_jsonb = jsonb::RawJsonb::new(slice);
 
-            let value = jsonb::from_raw_jsonb::<Value>(&raw_jsonb)
-                .unwrap_or_else(|_| jsonb_from_text(detoasted));
+            let value = jsonb::from_raw_jsonb::<Value>(&raw_jsonb).unwrap_or_else(|err| {
+                crate::warning!("jsonb binary parse failed, falling back to text parse: {:?}", err);
+                jsonb_from_text(detoasted)
+            });
 
             // free the detoasted datum if it turned out to be a copy
             if detoasted != varlena {
@@ -163,7 +165,7 @@ unsafe fn jsonb_from_text(detoasted: *mut pg_sys::varlena) -> Value {
 }
 
 unsafe fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
-    let len = bytes.len().saturating_add(pg_sys::VARHDRSZ);
+    let len = bytes.len().checked_add(pg_sys::VARHDRSZ)?;
     // Postgres varlena uses a 30-bit effective length field (the top 2 bits are flag bits).
     // This is the same upper-bound check used by existing bytea/text datum conversions in pgrx.
     if len >= (u32::MAX as usize >> 2) {
@@ -175,8 +177,7 @@ unsafe fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
 
     // SAFETY: `varlena` can properly cast into a `varattrib_4b` and all of what it contains is properly
     // allocated thanks to our call to `palloc` above
-    let varattrib = varlena.cast::<pg_sys::varattrib_4b>();
-    let varattrib_ref = varattrib.as_mut().unwrap_unchecked();
+    let varattrib_ref = varlena.cast::<pg_sys::varattrib_4b>().as_mut()?;
     let varattrib_4b = &mut varattrib_ref.va_4byte;
 
     set_varsize_4b(varlena, len as i32);
