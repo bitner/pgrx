@@ -111,8 +111,9 @@ mod tests {
             "num": 123.456
         });
 
-        let json = Spi::get_one_with_args::<JsonB>("SELECT $1::jsonb;", &[JsonB(input.clone()).into()])?
-            .expect("jsonb was null");
+        let json =
+            Spi::get_one_with_args::<JsonB>("SELECT $1::jsonb;", &[JsonB(input.clone()).into()])?
+                .expect("jsonb was null");
 
         assert_eq!(json.0, input);
 

@@ -69,8 +69,8 @@ impl FromDatum for JsonB {
             let slice = std::slice::from_raw_parts(data as *const u8, len);
             let raw_jsonb = jsonb::RawJsonb::new(slice);
 
-            let value =
-                jsonb::from_raw_jsonb::<Value>(&raw_jsonb).unwrap_or_else(|_| jsonb_from_text(detoasted));
+            let value = jsonb::from_raw_jsonb::<Value>(&raw_jsonb)
+                .unwrap_or_else(|_| jsonb_from_text(detoasted));
 
             // free the detoasted datum if it turned out to be a copy
             if detoasted != varlena {
@@ -146,7 +146,7 @@ impl IntoDatum for JsonB {
     }
 }
 
-unsafe fn jsonb_from_text(detoasted: *mut core::ffi::c_void) -> Value {
+unsafe fn jsonb_from_text(detoasted: *mut pg_sys::varlena) -> Value {
     let cstr =
         direct_function_call::<&core::ffi::CStr>(pg_sys::jsonb_out, &[Some(detoasted.into())])
             .expect("datum must refer to a valid jsonb varlena");
