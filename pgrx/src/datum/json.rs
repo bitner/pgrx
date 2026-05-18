@@ -70,7 +70,10 @@ impl FromDatum for JsonB {
             let raw_jsonb = jsonb::RawJsonb::new(slice);
 
             let value = jsonb::from_raw_jsonb::<Value>(&raw_jsonb).unwrap_or_else(|err| {
-                crate::warning!("jsonb binary parse failed, falling back to text parse: {:?}", err);
+                crate::warning!(
+                    "jsonb binary parse failed for Postgres jsonb datum ({:?}); falling back to jsonb_out text parse",
+                    err
+                );
                 jsonb_from_text(detoasted)
             });
 
@@ -165,6 +168,8 @@ unsafe fn jsonb_from_text(detoasted: *mut pg_sys::varlena) -> Value {
 }
 
 unsafe fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
+    // Overflow means the requested varlena allocation cannot be represented in usize.
+    // Return None so callers can fall back to the text-based jsonb_in path.
     let len = bytes.len().checked_add(pg_sys::VARHDRSZ)?;
     // Postgres varlena uses a 30-bit effective length field (the top 2 bits are flag bits).
     // This is the same upper-bound check used by existing bytea/text datum conversions in pgrx.
@@ -177,7 +182,10 @@ unsafe fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
 
     // SAFETY: `varlena` can properly cast into a `varattrib_4b` and all of what it contains is properly
     // allocated thanks to our call to `palloc` above
-    let varattrib_ref = varlena.cast::<pg_sys::varattrib_4b>().as_mut()?;
+    let varattrib_ref = varlena
+        .cast::<pg_sys::varattrib_4b>()
+        .as_mut()
+        .expect("palloc returned a null varlena pointer");
     let varattrib_4b = &mut varattrib_ref.va_4byte;
 
     set_varsize_4b(varlena, len as i32);
