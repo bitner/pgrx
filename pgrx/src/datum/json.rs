@@ -9,9 +9,8 @@
 //LICENSE Use of this source code is governed by the MIT license that can be found in the LICENSE file.
 use crate::{
     FromDatum, IntoDatum, direct_function_call, direct_function_call_as_datum, pg_sys,
-    set_varsize_4b, vardata_any, varsize_any_exhdr, void_mut_ptr,
+    vardata_any, varsize_any_exhdr, void_mut_ptr,
 };
-use core::ptr::addr_of_mut;
 use pgrx_sql_entity_graph::metadata::{
     ArgumentError, ReturnsError, ReturnsRef, SqlMappingRef, SqlTranslatable,
 };
@@ -64,18 +63,7 @@ impl FromDatum for JsonB {
         } else {
             let varlena = datum.cast_mut_ptr();
             let detoasted = pg_sys::pg_detoast_datum_packed(varlena);
-            let len = varsize_any_exhdr(detoasted);
-            let data = vardata_any(detoasted);
-            let slice = std::slice::from_raw_parts(data as *const u8, len);
-            let raw_jsonb = jsonb::RawJsonb::new(slice);
-
-            let value = jsonb::from_raw_jsonb::<Value>(&raw_jsonb).unwrap_or_else(|err| {
-                crate::warning!(
-                    "jsonb binary decoding failed, falling back to text-based decoding: {}",
-                    err
-                );
-                jsonb_from_text(detoasted)
-            });
+            let value = jsonb_from_text(detoasted);
 
             // free the detoasted datum if it turned out to be a copy
             if detoasted != varlena {
@@ -134,20 +122,11 @@ impl IntoDatum for Json {
 /// for jsonb
 impl IntoDatum for JsonB {
     fn into_datum(self) -> Option<pg_sys::Datum> {
-        let value = jsonb::Value::from(&self.0);
-        let bytes = value.to_vec();
-        // `jsonb_from_binary` is a safe function: all raw pointer work is self-contained inside.
-        jsonb_from_binary(&bytes).or_else(|| {
-            // Keep the historical text-based path as a compatibility fallback when direct
-            // binary allocation/encoding cannot be represented safely.
-            let string = serde_json::to_string(&self.0).unwrap();
-            let cstring = alloc::ffi::CString::new(string)
-                .expect("a text version of jsonb must contain no null terminator");
-            // SAFETY: `jsonb_in` is a valid Postgres function that accepts a null-terminated CStr.
-            unsafe {
-                direct_function_call_as_datum(pg_sys::jsonb_in, &[Some(cstring.as_ptr().into())])
-            }
-        })
+        let string = serde_json::to_string(&self.0).unwrap();
+        let cstring = alloc::ffi::CString::new(string)
+            .expect("a text version of jsonb must contain no null terminator");
+        // SAFETY: `jsonb_in` is a valid Postgres function that accepts a null-terminated CStr.
+        unsafe { direct_function_call_as_datum(pg_sys::jsonb_in, &[Some(cstring.as_ptr().into())]) }
     }
 
     fn type_oid() -> pg_sys::Oid {
@@ -175,43 +154,6 @@ unsafe fn jsonb_from_text(detoasted: *mut pg_sys::varlena) -> Value {
     pg_sys::pfree(cstr.as_ptr() as void_mut_ptr);
 
     value
-}
-
-fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
-    const VARLENA_MAX_SIZE: usize = u32::MAX as usize >> 2;
-
-    // Overflow means the requested varlena allocation cannot be represented in usize.
-    // Return None so callers can fall back to the text-based jsonb_in path.
-    let len = bytes.len().checked_add(pg_sys::VARHDRSZ)?;
-    // Postgres varlena uses a 30-bit effective length field (the top 2 bits are flag bits).
-    // This is the same upper-bound check used by existing bytea/text datum conversions in pgrx.
-    if len >= VARLENA_MAX_SIZE {
-        return None;
-    }
-
-    // SAFETY: `palloc` always succeeds inside a Postgres backend (or raises an ereport error),
-    // and `len` has been bounds-checked above so the allocation is valid.
-    let varlena = unsafe { pg_sys::palloc(len) as *mut pg_sys::varlena };
-
-    // SAFETY: `varlena` is non-null (palloc succeeded) and points to `len` bytes of writable
-    // Postgres-owned memory.  `set_varsize_4b` and `copy_nonoverlapping` only touch memory
-    // within those bounds.
-    unsafe {
-        let varattrib_ref = varlena
-            .cast::<pg_sys::varattrib_4b>()
-            .as_mut()
-            .expect("BUG: palloc returned a null pointer, which should never happen in a Postgres backend");
-        let varattrib_4b = &mut varattrib_ref.va_4byte;
-
-        set_varsize_4b(varlena, len as i32);
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            addr_of_mut!(varattrib_4b.va_data).cast::<u8>(),
-            bytes.len(),
-        );
-    }
-
-    Some(pg_sys::Datum::from(varlena))
 }
 
 /// for jsonstring
