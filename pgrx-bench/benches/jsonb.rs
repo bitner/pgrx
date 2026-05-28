@@ -1,12 +1,31 @@
-// Benchmarks comparing the binary JSONB encode/decode path (new) against the text-based
-// roundtrip path (old, using serde_json text serialization).
+// Pure-Rust benchmarks comparing the `jsonb` crate's binary encode/decode
+// against plain JSON text serialization via `serde_json`.
 //
-// These benchmarks intentionally do NOT require a running Postgres instance.  They measure only
-// the pure-Rust conversion work — the part that changed — for three representative payload sizes:
+// These benchmarks intentionally do NOT require a running Postgres instance.
+// They measure only pure-Rust conversion work for three representative payload
+// sizes:
 //
 //   - small:  a flat object with a handful of scalar fields
 //   - medium: a nested object several levels deep with mixed types
 //   - large:  an array of 100 medium-sized objects
+//
+// ⚠️  NOTE ON FORMAT COMPATIBILITY
+// The `jsonb` crate (by Datafuse Labs) uses a binary format *inspired by*
+// PostgreSQL's JSONB but is NOT bit-for-bit compatible with it.  In
+// particular the container type constants differ:
+//
+//   PostgreSQL (pg16):     JB_FOBJECT = 0x20000000,  JB_FARRAY = 0x40000000
+//   jsonb crate (v0.5.6):  object     = 0x40000000,  array     = 0x80000000
+//
+// As a result, bytes produced by `jsonb::Value::to_vec()` cannot be fed
+// directly into a Postgres JSONB varlena, and raw Postgres JSONB bytes
+// cannot be parsed by `jsonb::from_raw_jsonb`.  The in-Postgres `JsonB`
+// type therefore uses the text-based `jsonb_out`/`jsonb_in` C functions
+// instead of this crate.
+//
+// These benchmarks are nonetheless useful for comparing the relative cost
+// of the `jsonb` crate's custom binary format vs. plain JSON text, without
+// Postgres overhead.
 //
 // Run with:
 //   cargo bench -p pgrx-bench --bench jsonb
@@ -16,42 +35,19 @@
 //   # (apply changes)
 //   cargo bench -p pgrx-bench --bench jsonb -- --baseline old
 //
-// For in-postgres benchmarks that measure the full Postgres roundtrip (palloc, detoast,
-// C function call overhead), see pgrx-unit-tests/src/tests/json_tests.rs and run:
+// For in-postgres benchmarks that measure the full Postgres roundtrip
+// (palloc, detoast, C function call overhead), see
+// pgrx-unit-tests/src/json_benches.rs and run:
 //   cargo pgrx bench pgrx-unit-tests --features pg16,pg_bench
 //
 // ── Memory usage ────────────────────────────────────────────────────────────
 // The `bench_sizes` group below prints the encoded byte sizes for each path.
-// This acts as a lower-bound proxy for per-call memory: the caller must hold
-// both the input varlena and the decoded serde_json::Value in memory at the
-// same time, plus the encoded output bytes before they are copied into a
-// palloc'd varlena.
+// This acts as a lower-bound proxy for per-call memory.
 //
 // Typical observation:
-//   Binary size ≈ text size for most workloads (Postgres binary JSONB is
-//   not particularly compact vs. minified JSON text).  The real difference
-//   is in *allocations*: the old text path produced an extra heap String
-//   (from jsonb_out) on decode and an extra CString + jsonb_in Datum on
-//   encode; the binary path eliminates both of those intermediate strings.
-//
-// ── Zero-copy and TOAST ──────────────────────────────────────────────────────
-// True zero-copy from Postgres to Rust is NOT possible through the standard
-// JsonB API today, for two reasons:
-//
-//   1. TOAST decompression always copies.  pg_detoast_datum_packed returns
-//      the original pointer only when the datum is stored inline with the
-//      short 1-byte varlena header and is neither compressed nor out-of-line.
-//      Any larger or compressed datum triggers a palloc'd copy before our
-//      code even sees the bytes.
-//
-//   2. Building a serde_json::Value allocates.  Even when detoast is a no-op
-//      the binary bytes must be walked and decoded into a heap-allocated Value
-//      tree.  Avoiding that allocation would require a different, lazy
-//      representation (e.g., a `RawJsonb` datum type that exposes the raw
-//      binary slice directly) which is a separate future effort.
-//
-// The binary path does reduce unnecessary intermediate copies compared with
-// the old text path, but does not achieve zero-copy.
+//   Binary size ≈ text size for most workloads.  The main difference is in
+//   *allocations*: the binary path avoids intermediate UTF-8 Strings, while
+//   the text path allocates one String per encode and one per decode.
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use serde_json::{Value, json};

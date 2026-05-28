@@ -20,16 +20,17 @@ fn jsonb_arg(json: JsonB) -> JsonB {
     json
 }
 
-/// Roundtrip a jsonb value through the **text** path: the raw binary varlena is converted to a
-/// JSON text string via `jsonb_out`, parsed into a `serde_json::Value`, then serialized back to
-/// text and fed into `jsonb_in` to produce the return datum.
+/// Roundtrip a jsonb value with an **extra** Rust-side text serialization step.
 ///
-/// This deliberately mirrors the pre-binary code path that was removed, so the in-postgres
-/// benchmarks can compare the two approaches on real Postgres data including palloc, detoast,
-/// and the `jsonb_in`/`jsonb_out` C function call overhead.
+/// The standard `JsonB` roundtrip already goes through `jsonb_out` (decode) and
+/// `jsonb_in` (encode) once each.  This function adds an additional
+/// `serde_json::to_string` + `serde_json::from_str` round before returning, so
+/// the in-postgres benchmarks can compare the standard one-roundtrip cost against
+/// the cost of that extra Rust-side text conversion, including palloc, detoast,
+/// and the `jsonb_in`/`jsonb_out` C function overhead.
 #[pg_extern]
 fn jsonb_arg_via_text(json: JsonB) -> JsonB {
-    // Re-encode via text to simulate the old text-based roundtrip path.
+    // Extra Rust-side text roundtrip to measure its overhead vs the standard path.
     let text = serde_json::to_string(&json.0).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     JsonB(value)

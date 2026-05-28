@@ -8,8 +8,8 @@
 //LICENSE
 //LICENSE Use of this source code is governed by the MIT license that can be found in the LICENSE file.
 
-//! In-postgres benchmarks comparing the binary JSONB decode/encode path (current) against the
-//! old text-based roundtrip for three representative payload sizes.
+//! In-postgres benchmarks comparing the standard `JsonB` roundtrip cost against
+//! an explicitly doubled text-roundtrip, for three representative payload sizes.
 //!
 //! # How to run
 //!
@@ -17,38 +17,43 @@
 //! cargo pgrx bench pgrx-unit-tests --features pg16,pg_bench
 //! ```
 //!
-//! # Binary path (`bench_jsonb_binary_*`)
+//! # Standard path (`bench_jsonb_standard_*`)
+//!
+//! The `JsonB` type uses a text-based roundtrip via the Postgres C functions
+//! `jsonb_out` (decode) and `jsonb_in` (encode).  One call in each direction
+//! per datum, mediated by `serde_json::Value` on the Rust heap:
 //!
 //! ```text
-//! Postgres binary JSONB varlena
-//!   → pg_detoast_datum_packed       (copy only when TOAST'd or compressed)
-//!   → jsonb::from_raw_jsonb::<Value> (binary parse, no text conversion)
-//!   → serde_json::Value
-//!   → jsonb::Value::to_vec           (binary encode)
-//!   → palloc + memcpy into result varlena
+//! Postgres JSONB varlena
+//!   → pg_detoast_datum_packed  (copy only when TOAST'd or compressed)
+//!   → jsonb_out                (Postgres C fn: binary varlena → JSON text CStr)
+//!   → serde_json::from_str     (JSON text → serde_json::Value)
+//!   → serde_json::to_string    (serde_json::Value → JSON text String)
+//!   → jsonb_in                 (Postgres C fn: JSON text CStr → binary varlena)
 //! ```
 //!
-//! # Text path (`bench_jsonb_text_*`)
+//! # Extra-text path (`bench_jsonb_extra_text_*`)
 //!
-//! The same binary varlena input, but the Rust side explicitly serialises the
-//! already-decoded `Value` back to a JSON text string and re-parses it,
-//! reproducing the extra text-conversion work of the old code path.
+//! The same standard decode, but the Rust side then explicitly serialises the
+//! already-decoded `Value` back to a JSON text string and re-parses it before
+//! calling `into_datum`.  This measures the overhead of that extra
+//! serialization/deserialization round.
 //!
 //! # Memory profile (per roundtrip)
 //!
-//! Binary path allocations:
+//! Standard path allocations:
 //!   1. detoasted varlena copy (only when TOAST'd/compressed)
-//!   2. `serde_json::Value` tree on the Rust heap
-//!   3. `Vec<u8>` from `jsonb::Value::to_vec`
-//!   4. palloc'd result varlena
+//!   2. JSON text CStr from `jsonb_out`
+//!   3. `serde_json::Value` tree on the Rust heap
+//!   4. JSON text String from `serde_json::to_string`
+//!   5. palloc'd result varlena via `jsonb_in`
 //!
-//! Text path adds two extra allocations on top of the above:
-//!   5. `String` from `serde_json::to_string`   ← extra
-//!   6. `String` from `serde_json::from_str`    ← extra
+//! Extra-text path adds two allocations on top of the above:
+//!   6. `String` from the extra `serde_json::to_string`   ← extra
+//!   7. `serde_json::Value` from the extra `serde_json::from_str` ← extra
 //!
-//! So the text path allocates roughly `2 × json_text_len` bytes extra per call.
-//! For typical small-to-medium payloads that is hundreds to a few thousand extra
-//! bytes per call, held live simultaneously before the first drops.
+//! So the extra-text path allocates roughly `2 × json_text_len` bytes more per
+//! call than the standard path.
 //!
 //! # Zero-copy and TOAST
 //!
@@ -62,13 +67,10 @@
 //!    even sees the bytes.
 //!
 //! 2. **Building a `serde_json::Value` allocates.** Even when detoast is a
-//!    no-op the binary bytes must be walked and decoded into a heap-allocated
-//!    `Value` tree.  Avoiding that would require a different lazy representation
-//!    (e.g., a `RawJsonb` datum type exposing the binary slice directly), which
+//!    no-op the text must be parsed into a heap-allocated `Value` tree.
+//!    Avoiding that would require a different lazy representation (e.g., a
+//!    `RawJsonb` datum type exposing the text or binary slice directly), which
 //!    is a separate future effort.
-//!
-//! The binary path eliminates the extra intermediate text string copies that the
-//! old code path required, but it does not achieve zero-copy.
 
 use pgrx::prelude::*;
 use pgrx::JsonB;
@@ -81,23 +83,25 @@ use pgrx::JsonB;
 // json_tests.rs, which are only available under `pg_test`.
 // ---------------------------------------------------------------------------
 
-/// Identity roundtrip through the **binary** path (current implementation).
+/// Identity roundtrip through the **standard** `JsonB` path.
 ///
-/// Postgres calls `JsonB::from_polymorphic_datum` (binary decode) and then
-/// `JsonB::into_datum` (binary encode) around this no-op, so the benchmark
-/// measures the full binary decode + encode cost in a real Postgres process.
+/// Postgres calls `JsonB::from_polymorphic_datum` (decode via `jsonb_out`) and
+/// then `JsonB::into_datum` (encode via `jsonb_in`) around this no-op, so the
+/// benchmark measures the full standard decode + encode cost in a real Postgres
+/// process.
 #[pg_extern]
-fn bench_jsonb_binary(json: JsonB) -> JsonB {
+fn bench_jsonb_standard(json: JsonB) -> JsonB {
     json
 }
 
-/// Identity roundtrip forced through the **text** path for comparison.
+/// Identity roundtrip with an **extra** Rust-side text serialization step.
 ///
-/// The datum is received via the binary decode path (unavoidable), but the
-/// `Value` is then serialised to text and re-parsed before being returned,
-/// reproducing the extra work performed by the pre-binary code path.
+/// The datum is decoded via the standard `jsonb_out` path (unavoidable), but
+/// the `Value` is then serialised to text and re-parsed before being returned.
+/// This measures the additional overhead of that extra serialization round
+/// compared to `bench_jsonb_standard`.
 #[pg_extern]
-fn bench_jsonb_text(json: JsonB) -> JsonB {
+fn bench_jsonb_extra_text(json: JsonB) -> JsonB {
     let text = serde_json::to_string(&json.0).unwrap();
     JsonB(serde_json::from_str(&text).unwrap())
 }
@@ -172,60 +176,60 @@ mod benches {
         JsonB(serde_json::Value::Array((0..100).map(|_| item.clone()).collect()))
     }
 
-    // -- Binary path --
+    // -- Standard path --
 
     #[pg_bench]
-    fn bench_jsonb_binary_small(b: &mut Bencher) {
+    fn bench_jsonb_standard_small(b: &mut Bencher) {
         b.iter_batched(
             small_jsonb,
-            |v| black_box(super::bench_jsonb_binary(black_box(v))),
+            |v| black_box(super::bench_jsonb_standard(black_box(v))),
             BatchSize::SmallInput,
         );
     }
 
     #[pg_bench]
-    fn bench_jsonb_binary_medium(b: &mut Bencher) {
+    fn bench_jsonb_standard_medium(b: &mut Bencher) {
         b.iter_batched(
             medium_jsonb,
-            |v| black_box(super::bench_jsonb_binary(black_box(v))),
+            |v| black_box(super::bench_jsonb_standard(black_box(v))),
             BatchSize::SmallInput,
         );
     }
 
     #[pg_bench]
-    fn bench_jsonb_binary_large(b: &mut Bencher) {
+    fn bench_jsonb_standard_large(b: &mut Bencher) {
         b.iter_batched(
             large_jsonb,
-            |v| black_box(super::bench_jsonb_binary(black_box(v))),
+            |v| black_box(super::bench_jsonb_standard(black_box(v))),
             BatchSize::SmallInput,
         );
     }
 
-    // -- Text path (comparison baseline) --
+    // -- Extra-text path (measures overhead of an additional Rust-side text roundtrip) --
 
     #[pg_bench]
-    fn bench_jsonb_text_small(b: &mut Bencher) {
+    fn bench_jsonb_extra_text_small(b: &mut Bencher) {
         b.iter_batched(
             small_jsonb,
-            |v| black_box(super::bench_jsonb_text(black_box(v))),
+            |v| black_box(super::bench_jsonb_extra_text(black_box(v))),
             BatchSize::SmallInput,
         );
     }
 
     #[pg_bench]
-    fn bench_jsonb_text_medium(b: &mut Bencher) {
+    fn bench_jsonb_extra_text_medium(b: &mut Bencher) {
         b.iter_batched(
             medium_jsonb,
-            |v| black_box(super::bench_jsonb_text(black_box(v))),
+            |v| black_box(super::bench_jsonb_extra_text(black_box(v))),
             BatchSize::SmallInput,
         );
     }
 
     #[pg_bench]
-    fn bench_jsonb_text_large(b: &mut Bencher) {
+    fn bench_jsonb_extra_text_large(b: &mut Bencher) {
         b.iter_batched(
             large_jsonb,
-            |v| black_box(super::bench_jsonb_text(black_box(v))),
+            |v| black_box(super::bench_jsonb_extra_text(black_box(v))),
             BatchSize::SmallInput,
         );
     }
