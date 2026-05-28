@@ -40,9 +40,11 @@ no-schema-generation = [
     "pgrx-tests/no-schema-generation",
 ]
 nightly = ["pgrx/nightly", "pgrx-tests/nightly"]
+pg_bench = ["dep:pgrx-bench"]
 
 [dependencies]
 pgrx-macros.workspace = true
+pgrx-bench = { path = "../pgrx-bench", optional = true }
 
 eyre.workspace = true
 libc.workspace = true

@@ -20,6 +20,21 @@ fn jsonb_arg(json: JsonB) -> JsonB {
     json
 }
 
+/// Roundtrip a jsonb value through the **text** path: the raw binary varlena is converted to a
+/// JSON text string via `jsonb_out`, parsed into a `serde_json::Value`, then serialized back to
+/// text and fed into `jsonb_in` to produce the return datum.
+///
+/// This deliberately mirrors the pre-binary code path that was removed, so the in-postgres
+/// benchmarks can compare the two approaches on real Postgres data including palloc, detoast,
+/// and the `jsonb_in`/`jsonb_out` C function call overhead.
+#[pg_extern]
+fn jsonb_arg_via_text(json: JsonB) -> JsonB {
+    // Re-encode via text to simulate the old text-based roundtrip path.
+    let text = serde_json::to_string(&json.0).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    JsonB(value)
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {

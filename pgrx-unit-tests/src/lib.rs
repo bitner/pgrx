@@ -15,6 +15,9 @@
 #[cfg(any(test, feature = "pg_test"))]
 mod tests;
 
+#[cfg(feature = "pg_bench")]
+mod json_benches;
+
 pgrx::pg_module_magic!(name, version);
 
 #[cfg(test)]
