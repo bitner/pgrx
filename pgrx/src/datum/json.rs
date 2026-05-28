@@ -141,7 +141,10 @@ impl IntoDatum for JsonB {
 /// remains valid for the duration of this function and that the memory it points to was obtained
 /// from a Postgres palloc family call (or is otherwise compatible with `pfree`).
 unsafe fn jsonb_from_text(detoasted: *mut pg_sys::varlena) -> Value {
-    assert!(!detoasted.is_null(), "jsonb_from_text requires a non-null varlena pointer");
+    assert!(
+        !detoasted.is_null(),
+        "caller contract violation: jsonb_from_text requires a non-null varlena pointer"
+    );
     let cstr =
         direct_function_call::<&core::ffi::CStr>(pg_sys::jsonb_out, &[Some(detoasted.into())])
             .expect("datum must refer to a valid jsonb varlena");
