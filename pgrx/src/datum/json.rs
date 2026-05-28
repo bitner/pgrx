@@ -155,6 +155,12 @@ impl IntoDatum for JsonB {
     }
 }
 
+/// # Safety
+///
+/// `detoasted` must be a valid, non-null pointer to a detoasted Postgres `varlena` datum that
+/// holds a well-formed JSONB value. The caller is responsible for ensuring that the pointer
+/// remains valid for the duration of this function and that the memory it points to was obtained
+/// from a Postgres palloc family call (or is otherwise compatible with `pfree`).
 unsafe fn jsonb_from_text(detoasted: *mut pg_sys::varlena) -> Value {
     let cstr =
         direct_function_call::<&core::ffi::CStr>(pg_sys::jsonb_out, &[Some(detoasted.into())])
@@ -194,7 +200,7 @@ fn jsonb_from_binary(bytes: &[u8]) -> Option<pg_sys::Datum> {
         let varattrib_ref = varlena
             .cast::<pg_sys::varattrib_4b>()
             .as_mut()
-            .expect("internal invariant violated: null varlena pointer");
+            .expect("BUG: palloc returned a null pointer, which should never happen in a Postgres backend");
         let varattrib_4b = &mut varattrib_ref.va_4byte;
 
         set_varsize_4b(varlena, len as i32);

@@ -137,14 +137,14 @@ fn bench_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("jsonb_decode");
 
     for (name, bytes) in &binary_payloads {
-        group.bench_with_input(BenchmarkId::new("binary", name), bytes.as_slice(), |b, s| {
-            b.iter(|| decode_binary(black_box(s)))
+        group.bench_with_input(BenchmarkId::new("binary", name), bytes.as_slice(), |b, bytes| {
+            b.iter(|| decode_binary(black_box(bytes)))
         });
     }
 
     for (name, text) in &text_payloads {
-        group.bench_with_input(BenchmarkId::new("text", name), text.as_str(), |b, s| {
-            b.iter(|| decode_text(black_box(s)))
+        group.bench_with_input(BenchmarkId::new("text", name), text.as_str(), |b, text| {
+            b.iter(|| decode_text(black_box(text)))
         });
     }
 
