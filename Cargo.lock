@@ -2404,7 +2404,6 @@ dependencies = [
  "bitflags 2.9.4",
  "bitvec",
  "enum-map",
- "jsonb",
  "libc",
  "pgrx-macros",
  "pgrx-pg-sys",
