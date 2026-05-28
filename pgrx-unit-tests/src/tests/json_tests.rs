@@ -20,6 +20,22 @@ fn jsonb_arg(json: JsonB) -> JsonB {
     json
 }
 
+/// Roundtrip a jsonb value with an **extra** Rust-side text serialization step.
+///
+/// The standard `JsonB` roundtrip already goes through `jsonb_out` (decode) and
+/// `jsonb_in` (encode) once each.  This function adds an additional
+/// `serde_json::to_string` + `serde_json::from_str` round before returning, so
+/// the in-postgres benchmarks can compare the standard one-roundtrip cost against
+/// the cost of that extra Rust-side text conversion, including palloc, detoast,
+/// and the `jsonb_in`/`jsonb_out` C function overhead.
+#[pg_extern]
+fn jsonb_arg_via_text(json: JsonB) -> JsonB {
+    // Extra Rust-side text roundtrip to measure its overhead vs the standard path.
+    let text = serde_json::to_string(&json.0).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    JsonB(value)
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
@@ -97,6 +113,25 @@ mod tests {
         .expect("json was null");
 
         assert_eq!(json.0, serde_json::json!({ "foo": "bar" }));
+
+        Ok(())
+    }
+
+    #[pg_test]
+    fn jsonb_roundtrip_complex() -> Result<(), pgrx::spi::Error> {
+        let input = serde_json::json!({
+            "user": "🦀",
+            "nested": {
+                "arr": [1, true, null, "text", {"k": "v"}]
+            },
+            "num": 123.456
+        });
+
+        let json =
+            Spi::get_one_with_args::<JsonB>("SELECT $1::jsonb;", &[JsonB(input.clone()).into()])?
+                .expect("jsonb was null");
+
+        assert_eq!(json.0, input);
 
         Ok(())
     }

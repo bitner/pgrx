@@ -18,14 +18,21 @@ homepage.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/pgrx-bench"
 edition.workspace = true
-include = ["src/**/*", "README.md"]
+include = ["src/**/*", "benches/**/*", "README.md"]
 
 [dependencies]
-criterion = { version = "0.5.1", default-features = false }
+criterion = { version = "0.5.1", default-features = false, features = ["html_reports"] }
 oorandom = "11.1.5"
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3.19.1"
+
+[dev-dependencies]
+jsonb = "0.5.6"
+
+[[bench]]
+name = "jsonb"
+harness = false
 
 [lints.rust]
 unsafe-op-in-unsafe-fn = "allow"

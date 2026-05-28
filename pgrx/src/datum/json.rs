@@ -8,8 +8,8 @@
 //LICENSE
 //LICENSE Use of this source code is governed by the MIT license that can be found in the LICENSE file.
 use crate::{
-    FromDatum, IntoDatum, direct_function_call, direct_function_call_as_datum, pg_sys, vardata_any,
-    varsize_any_exhdr, void_mut_ptr,
+    FromDatum, IntoDatum, direct_function_call, direct_function_call_as_datum, pg_sys,
+    vardata_any, varsize_any_exhdr, void_mut_ptr,
 };
 use pgrx_sql_entity_graph::metadata::{
     ArgumentError, ReturnsError, ReturnsRef, SqlMappingRef, SqlTranslatable,
@@ -63,20 +63,7 @@ impl FromDatum for JsonB {
         } else {
             let varlena = datum.cast_mut_ptr();
             let detoasted = pg_sys::pg_detoast_datum_packed(varlena);
-
-            let cstr = direct_function_call::<&core::ffi::CStr>(
-                pg_sys::jsonb_out,
-                &[Some(detoasted.into())],
-            )
-            .expect("datum must refer to a valid jsonb varlena");
-
-            let value = serde_json::from_str(
-                cstr.to_str().expect("a text version of the jsonb must be valid utf-8"),
-            )
-            .expect("a text version of jsonb must be a valid json");
-
-            // free the cstring returned from direct_function_call -- we don't need it anymore
-            pg_sys::pfree(cstr.as_ptr() as void_mut_ptr);
+            let value = jsonb_from_text(detoasted);
 
             // free the detoasted datum if it turned out to be a copy
             if detoasted != varlena {
@@ -138,13 +125,39 @@ impl IntoDatum for JsonB {
         let string = serde_json::to_string(&self.0).unwrap();
         let cstring = alloc::ffi::CString::new(string)
             .expect("a text version of jsonb must contain no null terminator");
-
+        // SAFETY: `jsonb_in` is a valid Postgres function that accepts a null-terminated CStr.
         unsafe { direct_function_call_as_datum(pg_sys::jsonb_in, &[Some(cstring.as_ptr().into())]) }
     }
 
     fn type_oid() -> pg_sys::Oid {
         pg_sys::JSONBOID
     }
+}
+
+/// # Safety
+///
+/// `detoasted` must be a valid, non-null pointer to a detoasted Postgres `varlena` datum that
+/// holds a well-formed JSONB value. The caller is responsible for ensuring that the pointer
+/// remains valid for the duration of this function and that the memory it points to was obtained
+/// from a Postgres palloc family call (or is otherwise compatible with `pfree`).
+unsafe fn jsonb_from_text(detoasted: *mut pg_sys::varlena) -> Value {
+    assert!(
+        !detoasted.is_null(),
+        "caller contract violation: jsonb_from_text requires a non-null varlena pointer"
+    );
+    let cstr =
+        direct_function_call::<&core::ffi::CStr>(pg_sys::jsonb_out, &[Some(detoasted.into())])
+            .expect("datum must refer to a valid jsonb varlena");
+
+    let value = serde_json::from_str(
+        cstr.to_str().expect("a text version of the jsonb must be valid utf-8"),
+    )
+    .expect("a text version of jsonb must be a valid json");
+
+    // free the cstring returned from direct_function_call -- we don't need it anymore
+    pg_sys::pfree(cstr.as_ptr() as void_mut_ptr);
+
+    value
 }
 
 /// for jsonstring
